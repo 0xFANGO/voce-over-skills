@@ -10,7 +10,7 @@ description: 字幕生成与烧录。转录→词典纠错→审核→烧录。�
 ## 流程
 
 ```
-1. 转录视频
+1. 转录视频（本地 FunASR）
     ↓
 2. 词典纠错 + 分句
     ↓
@@ -22,7 +22,89 @@ description: 字幕生成与烧录。转录→词典纠错→审核→烧录。�
     ↓
 5. 我匹配时间戳 → 生成 SRT
     ↓
-6. 烧录字幕
+6. 烧录字幕（FFmpeg）
+```
+
+---
+
+## 转录
+
+使用 `剪口播/scripts/transcribe_local.py` 脚本：
+
+```bash
+python 剪口播/scripts/transcribe_local.py video.mp4 --output=transcript.json
+```
+
+输出 JSON 包含：
+- `full_text`: 完整文本
+- `chars`: 字符级时间戳
+
+**优点**：
+- 中文识别准确
+- 字符级时间戳，分句精确
+- 与剪口播共用同一脚本
+
+### ⚠️ 脚本位置规则
+
+**字幕相关脚本必须放在 `字幕/scripts/` 文件夹中**：
+- `generate_subtitle_draft.py` - 从转录结果生成分句字幕稿
+- `generate_srt.py` - 生成SRT字幕文件
+- 禁止在其他文件夹创建临时脚本
+
+**原因**：保持项目结构清晰，便于复用和维护
+
+---
+
+## 分句逻辑
+
+从字符级时间戳生成字幕句：
+
+```javascript
+/**
+ * 将字符数组分割为字幕句
+ * @param {Array} chars - 字符数组 [{char, start, end}, ...]
+ * @param {number} maxLen - 每行最大字数，默认 15
+ * @param {number} pauseThreshold - 停顿阈值（秒），默认 0.5
+ */
+function splitToSubtitles(chars, maxLen = 15, pauseThreshold = 0.5) {
+  const subtitles = [];
+  let current = { text: '', start: 0, end: 0 };
+
+  for (let i = 0; i < chars.length; i++) {
+    const char = chars[i];
+    const prevEnd = i > 0 ? chars[i - 1].end : 0;
+    const gap = char.start - prevEnd;
+
+    // 分句条件：标点 / 停顿 / 超长
+    const isPunc = /[，。？！、：；]/.test(char.char);
+    const isPause = gap >= pauseThreshold;
+    const isTooLong = current.text.length >= maxLen;
+
+    if ((isPunc || isPause || isTooLong) && current.text.length > 0) {
+      // 如果是标点，加上标点再分句
+      if (isPunc) {
+        current.text += char.char;
+        current.end = char.end;
+      }
+      subtitles.push({ ...current });
+      current = { text: '', start: char.start, end: char.end };
+      if (isPunc) continue;
+    }
+
+    if (current.text.length === 0) {
+      current.start = char.start;
+    }
+    current.text += char.char;
+    current.end = char.end;
+  }
+
+  // 最后一句
+  if (current.text.length > 0) {
+    subtitles.push(current);
+  }
+
+  return subtitles;
+}
 ```
 
 ---
@@ -48,7 +130,7 @@ Claude
 iPhone
 ```
 
-我自动识别变体：`claude` → `Claude`
+自动识别变体：`claude` → `Claude`
 
 ---
 
@@ -69,6 +151,37 @@ iPhone
 
 ---
 
+## SRT 生成
+
+```javascript
+/**
+ * 生成 SRT 格式字幕
+ */
+function generateSRT(subtitles) {
+  return subtitles.map((sub, i) => {
+    const start = formatTime(sub.start);
+    const end = formatTime(sub.end);
+    // 去掉句尾标点
+    const text = sub.text.replace(/[，。？！、：；]$/, '');
+    return `${i + 1}\n${start} --> ${end}\n${text}\n`;
+  }).join('\n');
+}
+
+function formatTime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
+}
+
+function pad(n, len = 2) {
+  return String(n).padStart(len, '0');
+}
+```
+
+---
+
 ## 样式
 
 默认：24号白字、黑色描边、底部居中
@@ -83,6 +196,14 @@ iPhone
 - "字大一点" → 32号
 - "放顶部" → 顶部居中
 - "黄色字幕" → 黄字黑边
+
+---
+
+## 烧录命令
+
+```bash
+ffmpeg -i video.mp4 -vf "subtitles=video.srt:force_style='FontSize=24,FontName=PingFang SC,OutlineColour=&H000000&,Outline=2,MarginV=30'" -c:a copy output.mp4
+```
 
 ---
 
